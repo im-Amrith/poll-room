@@ -2,18 +2,46 @@
 
 A modern, real-time polling application built with Next.js, Firebase, and Tailwind CSS. Create polls, share them via unique links, and watch results update in real-time across all connected clients.
 
-## Features
+## ✨ Premium Features
 
+### Core Features
 - **Poll Creation**: Create polls with custom questions and multiple options (minimum 2)
 - **Unique Sharing Links**: Each poll gets a unique URL for easy sharing
 - **Real-Time Updates**: Vote counts update instantly across all viewers using Firestore real-time listeners
-- **Anti-Abuse Protection**: Dual-layer voting protection:
+- **Anti-Abuse Protection**: Dual-layer voting protection with visible integrity badges
   - Client-side: localStorage tracking
   - Server-side: IP address hashing and validation
 - **No Login Required**: Anyone with the link can vote
 - **Responsive Design**: Works seamlessly on desktop and mobile devices
-- **Database Persistence**: All data persists in Firebase Firestore
-- **Atomic Operations**: Race condition-proof vote counting with Firestore transactions
+
+### 🎯 Advanced Features (Shortlist Differentiators)
+
+1. **📊 Local Poll History**
+   - Automatically saves all created polls to browser localStorage
+   - "Your Recent Polls" section on homepage
+   - No authentication required - simple and effective
+
+2. **📱 Native Mobile Sharing**
+   - Web Share API for native share experience on mobile
+   - Automatic fallback to clipboard copy on desktop
+   - Toast notifications for user feedback
+
+3. **🎬 Animated Results**
+   - Smooth bar chart animations using Framer Motion
+   - Vote counts pulse when updated
+   - Professional, polished real-time experience
+
+4. **✅ Voter Integrity Indicators**
+   - Visible badges showing anti-abuse checks passed
+   - "Browser Check Passed" and "IP Check Passed" indicators
+   - Transparent fairness system
+
+5. **📲 QR Code Generation**
+   - One-click QR code generation for instant sharing
+   - Perfect for classrooms, meetings, or physical spaces
+   - Smooth expand/collapse animations
+
+**See [IMPROVEMENTS.md](IMPROVEMENTS.md) for detailed feature documentation.**
 
 ## Tech Stack
 
@@ -21,6 +49,8 @@ A modern, real-time polling application built with Next.js, Firebase, and Tailwi
 - **Styling**: Tailwind CSS 4
 - **Database**: Firebase Firestore (NoSQL)
 - **Real-Time**: Firestore real-time listeners (onSnapshot)
+- **Animations**: Framer Motion
+- **QR Codes**: react-qr-code
 - **Deployment**: Vercel-ready
 
 ## Getting Started
