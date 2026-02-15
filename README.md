@@ -140,10 +140,80 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 
 **Dual-Layer Security:**
 
-- **Layer 1 - Client-Side**: localStorage tracking prevents accidental duplicate votes
-- **Layer 2 - Server-Side**: IP address hashing (SHA-256) blocks malicious repeat voting
+This application implements a two-tier fairness system to prevent vote manipulation while maintaining user privacy.
 
-Both checks are visually indicated with integrity badges after voting.
+#### 🛡️ Layer 1: Client-Side Detection (Browser Fingerprinting)
+
+**Implementation:**
+- Generates a unique device ID using `nanoid()` on first visit
+- Stores device ID in browser's localStorage
+- Checks localStorage for `voted_poll_[pollId]` before allowing votes
+- After voting, stores the poll ID in localStorage to prevent re-voting
+
+**Purpose:**
+- **User Experience**: Provides instant feedback without server round-trip
+- **Convenience Protection**: Prevents accidental duplicate votes from the same browser
+
+**Code Location:** `lib/utils.ts` → `hasVotedOnPoll()`, `markPollAsVoted()`
+
+**Limitations:**
+- Can be bypassed by clearing browser data
+- Incognito/private browsing creates a new "device"
+- Different browsers on the same device are treated as separate devices
+
+**When it triggers:**
+- User tries to vote twice from the same browser session
+- User refreshes page after voting (vote button remains disabled)
+
+---
+
+#### 🔒 Layer 2: Server-Side IP Verification (Hard Enforcement)
+
+**Implementation:**
+- Extracts user's IP address from request headers (`x-forwarded-for` or `x-real-ip`)
+- Hashes IP using SHA-256 for privacy (never stores raw IPs)
+- Queries `votes` collection in Firestore for `poll_id` + `ip_hash` combination
+- Creates a new vote record if not found, returns 429 error if duplicate detected
+- Uses Firestore transactions to atomically increment vote count
+
+**Purpose:**
+- **Security**: Hard stop against malicious voting attempts
+- **Privacy**: IP hashing ensures user anonymity while maintaining integrity
+- **Fairness**: Ensures one vote per IP address, regardless of browser tricks
+
+**Code Location:** `app/api/vote/[pollId]/route.ts` → POST handler
+
+**Data Flow:**
+```
+1. User clicks vote → Client sends POST /api/vote/[pollId]
+2. Server extracts IP → Hashes with SHA-256
+3. Check Firestore: WHERE poll_id == X AND ip_hash == Y
+4. If exists → Return 429 "Already voted"
+5. If new → Create vote record + increment option.vote_count
+6. Return success → Client shows integrity badges
+```
+
+**Limitations:**
+- **Shared Networks**: Users behind the same NAT/proxy (office WiFi, school, public WiFi) share an IP
+  - Only the first person can vote
+  - Subsequent users from the same network will be blocked
+- **Dynamic IPs**: Users with changing IPs (mobile data, VPN switching) might vote multiple times
+- **VPN Bypass**: Sophisticated users can change VPN servers to get new IPs
+
+**Trade-offs Made:**
+- Chose IP-based tracking over authentication to maintain "no login required" UX
+- Accepted shared network limitation as acceptable for most poll use cases
+- Privacy-first approach (hashing) over raw IP logging
+
+---
+
+#### 📊 Visual Transparency
+
+After voting, users see two integrity badges:
+- ✅ **Browser Check Passed** - localStorage validation succeeded
+- ✅ **IP Check Passed** - Server verified no duplicate from this IP
+
+This builds trust by showing the security measures in action.
 
 ## Project Structure
 
@@ -191,13 +261,148 @@ poll-room/
 
 ## ⚡ Edge Cases & Error Handling
 
-| Scenario | Solution |
-|----------|----------|
-| **Concurrent Voting** | Firestore transactions with atomic increments prevent race conditions |
-| **Invalid Poll ID** | Custom 404 page with link to create new poll |
-| **Network Failure** | Optimistic UI updates with automatic rollback on error |
-| **Duplicate Voting** | 429 status returned + visual feedback showing "Already Voted" |
-| **Shared IP Networks** | Note displayed that office/school WiFi may only allow one vote |
+| Scenario | How It's Handled | Implementation Details |
+|----------|------------------|------------------------|
+| **Concurrent Voting** | Firestore transactions with atomic increments | Uses `runTransaction()` with `increment(1)` to prevent race conditions where simultaneous votes could result in incorrect counts |
+| **Invalid Poll ID** | Custom 404 error page | Checks if poll exists in Firestore. If not found or ID is malformed, shows friendly error with "Create New Poll" button |
+| **Network Failure** | Optimistic UI with rollback | Vote count increments immediately (optimistic update). If API fails, reverts count and displays error toast |
+| **Duplicate Voting (Same Browser)** | localStorage check blocks UI | Vote buttons disabled instantly if `voted_poll_[id]` exists in localStorage. User sees "Already Voted" badge |
+| **Duplicate Voting (Different Browser)** | Server returns 429 status | IP hash check on server. Returns HTTP 429 with error message. Client displays "You've already voted" warning |
+| **Shared IP Networks** | Graceful limitation notice | First user votes successfully. Second user blocked by IP check. UI explains: "This may happen on shared networks like office WiFi" |
+| **Missing Environment Variables** | Firebase initialization failure | App shows error message asking user to configure `.env.local` file. Returns 500 on API calls with helpful error |
+| **Empty Poll Options** | Client-side validation | Minimum 2 options required. Submit button disabled until requirement met. Shows validation message |
+| **XSS Attacks** | React auto-escaping + Firestore rules | React automatically escapes user input. Firestore security rules validate data types and field requirements |
+| **Real-Time Listener Memory Leak** | Proper cleanup with useEffect | `onSnapshot` listener is unsubscribed in cleanup function to prevent memory leaks on component unmount |
+| **Poll Not Found (Deleted)** | Real-time detection | If poll is deleted while user viewing, listener detects and shows "Poll no longer exists" message |
+| **Extreme Vote Counts** | Number overflow protection | Firestore numbers support up to 2^53-1 (JavaScript safe integer limit). Unlikely to reach in normal usage |
+
+### Detailed Edge Case Examples
+
+#### Case 1: Race Condition During Concurrent Votes
+**Scenario:** Two users vote for the same option within milliseconds.
+
+**Without Protection:**
+```
+User A reads vote_count: 10
+User B reads vote_count: 10
+User A writes vote_count: 11
+User B writes vote_count: 11  ❌ Lost User A's vote!
+```
+
+**With Firestore Transactions:**
+```typescript
+await runTransaction(db, async (transaction) => {
+  transaction.update(optionRef, {
+    vote_count: increment(1)  // Atomic operation
+  });
+});
+```
+**Result:** Both votes counted correctly → final count is 12
+
+---
+
+#### Case 2: Network Timeout During Vote Submission
+**Scenario:** User clicks vote but WiFi disconnects before server responds.
+
+**Behavior:**
+1. Optimistic update shows vote count increase immediately
+2. POST request times out after 10 seconds
+3. Client catches error in try/catch block
+4. Vote count reverted to previous value
+5. Error toast: "Failed to submit vote. Please check your connection."
+6. User can retry voting (localStorage not marked yet)
+
+---
+
+#### Case 3: Shared Office WiFi Limitation
+**Scenario:** 50 employees want to vote on lunch options from the same office network.
+
+**What Happens:**
+- First employee votes successfully ✅
+- Remaining 49 employees see: "You have already voted on this poll"
+- IP check badge shows ⚠️ instead of ✅
+- Explanation text: "Note: Multiple users on the same network (office/school WiFi) share an IP address"
+
+**Workaround for Users:**
+- Vote from mobile data (different IP)
+- Use personal hotspot
+- Create separate polls for different departments
+
+**Why This Trade-off?**
+- Alternative would be requiring login (worse UX)
+- Cookie-based tracking can be cleared
+- Device fingerprinting is less reliable and privacy-invasive
+- Accepting this limitation keeps the app simple and accessible
+
+---
+
+## ⚠️ Known Limitations
+
+### Security & Anti-Abuse
+
+| Limitation | Impact | Potential Solution |
+|------------|--------|-------------------|
+| **Shared IP Blocking** | Users on same network (office, school, public WiFi) can't all vote | Implement authentication system with email/social login |
+| **VPN Bypass** | Sophisticated users can switch VPN servers to vote multiple times | Add CAPTCHA verification or rate limiting per time period |
+| **localStorage Clearing** | Client-side check bypassed by clearing browser data or incognito mode | Server-side IP check still enforces limit (this is acceptable) |
+| **Dynamic IP Exploitation** | Users with frequently changing IPs (mobile data) might vote multiple times | Implement device fingerprinting with Canvas/WebGL/Audio APIs |
+| **No Poll Deletion** | Once created, polls exist forever in Firestore | Add poll ownership with authentication and delete functionality |
+| **No Poll Editing** | Typos in questions/options cannot be fixed after creation | Add authentication and edit within X minutes of creation |
+| **Public Polls** | All polls are discoverable if someone guesses/finds the URL | Add optional password protection or unlisted/private modes |
+
+### User Experience
+
+| Limitation | Impact | Potential Solution |
+|------------|--------|-------------------|
+| **Poll History Limited to Browser** | Clearing localStorage loses all poll history | Add optional account creation with cloud sync |
+| **No Poll Expiration** | Polls remain open indefinitely | Add optional end date/time with automatic closure |
+| **Single-Choice Only** | Users can only select one option | Implement multi-select mode as an option |
+| **No Vote Changes** | Once voted, cannot change selection | Add "Change Vote" button with re-validation |
+| **No Results Before Voting** | Results only visible after voting (could be seen as limitation or feature) | Add toggle for poll creator to show/hide results before voting |
+| **Mobile QR Scanning** | Users on mobile can't scan QR code displayed on same device | Add "Copy Link" as primary action on mobile, QR as secondary |
+
+### Technical
+
+| Limitation | Impact | Potential Solution |
+|------------|--------|-------------------|
+| **Firestore Read Costs** | Real-time listeners cost 1 read per change per client | Implement read budget limits or move to WebSocket-based solution |
+| **No Offline Support** | App requires internet connection to create/vote | Add Progressive Web App (PWA) with service worker caching |
+| **No Data Export** | Poll creators can't export results to CSV/PDF | Add export functionality in poll options menu |
+| **No Analytics** | No insights on voting patterns, peak times, demographics | Integrate Google Analytics or build custom dashboard |
+| **No Moderation Tools** | No way to remove polls with inappropriate content | Add report button and admin moderation panel |
+| **Test Mode Firestore Rules** | Security rules are permissive for ease of use | Tighten rules to validate data shapes and prevent abuse |
+
+### Performance
+
+| Limitation | Impact | Potential Solution |
+|------------|--------|-------------------|
+| **Listener Scalability** | With 1000+ simultaneous viewers, Firestore costs increase significantly | Implement polling instead of real-time for high-traffic polls |
+| **No Pagination** | If a poll has 100+ options, page load will be slow | Add pagination or virtualized list for options |
+| **Animation Performance** | Framer Motion animations might lag on low-end devices | Add reduced motion media query support |
+| **Large Vote Counts** | Displaying "1,234,567 votes" without formatting | Add number formatting with commas/abbreviations (1.2M) |
+
+### Privacy & Compliance
+
+| Limitation | Impact | Potential Solution |
+|------------|--------|-------------------|
+| **IP Address Collection** | Might require disclosure in some jurisdictions (GDPR, CCPA) | Add privacy policy and cookie consent banner |
+| **No Data Retention Policy** | Votes stored indefinitely | Implement automatic deletion after 90 days or add data retention settings |
+| **No User Data Deletion** | No way for users to request IP hash removal | Add "Delete My Data" form with poll ID submission |
+
+---
+
+### Acceptance Criteria
+
+These limitations are **accepted trade-offs** for the current scope because:
+
+1. **Simplicity Over Features**: The app prioritizes ease of use (no login) over bullet-proof security
+2. **MVP Focus**: This is a demonstration/portfolio project, not an enterprise solution
+3. **Cost Efficiency**: Avoiding authentication systems and advanced fingerprinting keeps Firestore costs low
+4. **Educational Value**: Showcases real-time capabilities and basic anti-abuse without over-engineering
+
+**For production use at scale**, consider implementing authentication, advanced rate limiting, and poll management features.
+
+---
 
 ## Deployment
 
