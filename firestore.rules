@@ -1,0 +1,31 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Polls collection - public read, anyone can create
+    match /polls/{pollId} {
+      allow read: if true;
+      allow create: if true;
+      allow update: if false;
+      allow delete: if false;
+    }
+    
+    // Options collection - public read, auto-created with polls
+    match /options/{optionId} {
+      allow read: if true;
+      allow create: if true;
+      // Only allow updating vote_count field
+      allow update: if request.resource.data.diff(resource.data).affectedKeys().hasOnly(['vote_count']);
+      allow delete: if false;
+    }
+    
+    // Votes collection - for anti-abuse tracking
+    match /votes/{voteId} {
+      allow read: if true;
+      allow create: if true;
+      allow update: if false;
+      allow delete: if false;
+    }
+  }
+}
